@@ -1,3 +1,15 @@
+## ⚠️ Disclaimer & Project Status
+This repository is an independent, community-maintained fork of the `pico-fido` project. 
+
+**I am not affiliated, associated, authorized, endorsed by, or in any way officially connected with the original project developer.**
+
+### Why does this fork exist?
+This fork provides a completely free, pre-compiled `.uf2` binary specifically mapped for the **Waveshare RP2350-One** hardware layout. It hardcodes user presence to the physical BOOT button (GPIO 45) and status to the onboard WS2812 RGB LED (GPIO 16) at the compilation layer, bypassing the need for any downstream proprietary configuration utilities. 
+
+This firmware is distributed entirely under the open-source AGPLv3 license terms. Use at your own risk.
+
+
+
 # Pico FIDO
 This project transforms your Raspberry Pi Pico or ESP32 microcontroller into an integrated FIDO Passkey, functioning like a standard USB Passkey for authentication.
 
