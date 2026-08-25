@@ -92,8 +92,11 @@ int cbor_get_info(void) {
     CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder, lfields));
 
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x01));
-    CBOR_CHECK(cbor_encoder_create_array(&mapEncoder, &arrayEncoder, 5));
-    CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "U2F_V2"));
+    bool alwaysUv = (get_opts() & FIDO2_OPT_AUV) || (file_has_data(ef_pin) && !keydev_unlocked);
+    CBOR_CHECK(cbor_encoder_create_array(&mapEncoder, &arrayEncoder, 4 + !alwaysUv));
+    if (!alwaysUv) {
+        CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "U2F_V2"));
+    }
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "FIDO_2_0"));
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "FIDO_2_1"));
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "FIDO_2_2"));
@@ -127,9 +130,7 @@ int cbor_get_info(void) {
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "rk"));
     CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, !(get_opts() & FIDO2_OPT_NORK)));
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "alwaysUv"));
-    //bool alwaysUv = file_has_data(ef_pin) && (get_opts() & FIDO2_OPT_AUV || !getUserVerifiedFlagValue());
-    //CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, alwaysUv));
-    CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, get_opts() & FIDO2_OPT_AUV));
+    CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, alwaysUv));
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "credMgmt"));
     CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, true));
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "authnrCfg"));
@@ -224,13 +225,15 @@ int cbor_get_info(void) {
     if (phy_data.vid != 0x1050) {
 #endif
         CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x15));
-        CBOR_CHECK(cbor_encoder_create_array(&mapEncoder, &arrayEncoder, 6));
+        CBOR_CHECK(cbor_encoder_create_array(&mapEncoder, &arrayEncoder, 8));
         CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_AUT_DISABLE));
         CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_EA_UPLOAD));
         CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_MCUV_NOTRQD));
         CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_AUT_ENABLE));
         CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_NORK));
         CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_PIN_POLICY));
+        CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_CREDENTIAL_REVOKE));
+        CBOR_CHECK(cbor_encode_uint(&arrayEncoder, CTAP_CONFIG_CREDENTIAL_EXPIRE));
         CBOR_CHECK(cbor_encoder_close_container(&mapEncoder, &arrayEncoder));
 #ifndef ENABLE_EMULATION
     }

@@ -22,20 +22,43 @@
 #include "ctap.h"
 #include "hid/ctap_hid.h"
 #include "files.h"
+#include "credential.h"
 #include "apdu.h"
 #include "random.h"
+#include "button.h"
+#include "led/led.h"
+#if defined(ESP_PLATFORM)
+#include "compat/esp_compat.h"
+#else
+#include "compat/board.h"
+#endif
+#include "crypto_utils.h"
 #include "mbedtls/ecdh.h"
 #include "mbedtls/chachapoly.h"
+#include "mbedtls/gcm.h"
 #include "mbedtls/hkdf.h"
+#include "mbedtls/md.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/constant_time.h"
 #include "mbedtls/x509_csr.h"
+#include "mbedtls/x509_crt.h"
+
+#include "fido_vault.h"
 
 extern uint8_t keydev_dec[32];
 extern bool has_keydev_dec;
 
 mse_t mse = { .init = false };
 
+static void mse_clear(void) {
+    mbedtls_platform_zeroize(mse.Qpt, sizeof(mse.Qpt));
+    mbedtls_platform_zeroize(mse.key_enc, sizeof(mse.key_enc));
+    mse.init = false;
+}
+
 int mse_decrypt_ct(uint8_t *data, size_t len) {
     if (data == NULL || len < 16) {
+        mse_clear();
         return -1;
     }
     mbedtls_chachapoly_context chatx;
@@ -43,6 +66,7 @@ int mse_decrypt_ct(uint8_t *data, size_t len) {
     mbedtls_chachapoly_setkey(&chatx, mse.key_enc + 12);
     int ret = mbedtls_chachapoly_auth_decrypt(&chatx, len - 16, mse.key_enc, mse.Qpt, 65, data + len - 16, data, data);
     mbedtls_chachapoly_free(&chatx);
+    mse_clear();
     return ret;
 }
 
@@ -53,8 +77,13 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
     CborByteString pinUvAuthParam = { 0 }, vendorParam = { 0 }, kax = { 0 }, kay = { 0 };
     size_t resp_size = 0;
     uint64_t vendorCmd = 0, pinUvAuthProtocol = 0;
+    uint64_t vault_algorithm = 0;
+    bool vault_algorithm_present = false;
     int64_t kty = 0, alg = 0, crv = 0;
     CborEncoder encoder, mapEncoder, mapEncoder2;
+    uint8_t *raw_vendor_params = NULL;
+    size_t raw_vendor_params_len = 0;
+    bool vault_response_handled = false;
 
     CBOR_CHECK(cbor_parser_init(data, len, 0, &parser, &map));
     uint64_t val_c = 1;
@@ -74,6 +103,7 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
         }
         else if (val_u == 0x02) {
             uint64_t subpara = 0;
+            raw_vendor_params = (uint8_t *)cbor_value_get_next_byte(&_f1);
             CBOR_PARSE_MAP_START(_f1, 2)
             {
                 CBOR_FIELD_GET_UINT(subpara, 2);
@@ -83,11 +113,16 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
                 else if (subpara == 0x02) {
                     CBOR_CHECK(COSE_read_key(&_f2, &kty, &alg, &crv, &kax, &kay));
                 }
+                else if (subpara == 0x03) {
+                    CBOR_FIELD_GET_UINT(vault_algorithm, 2);
+                    vault_algorithm_present = true;
+                }
                 else {
                     CBOR_ADVANCE(2);
                 }
             }
             CBOR_PARSE_MAP_END(_f1, 2);
+            raw_vendor_params_len = cbor_value_get_next_byte(&_f1) - raw_vendor_params;
         }
         else if (val_u == 0x03) {
             CBOR_FIELD_GET_UINT(pinUvAuthProtocol, 1);
@@ -97,7 +132,6 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
         }
     }
     CBOR_PARSE_MAP_END(map, 1);
-
     cbor_encoder_init(&encoder, ctap_resp->init.data + 1, CTAP_MAX_CBOR_PAYLOAD, 0);
 
     if (cmd == CTAP_VENDOR_BACKUP) {
@@ -132,6 +166,10 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
     }
     else if (cmd == CTAP_VENDOR_MSE) {
         if (vendorCmd == 0x01) { // KeyAgreement
+            if (mse.init) {
+                mse_clear();
+                CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
+            }
             if (kax.present == false || kay.present == false || alg == 0) {
                 CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
             }
@@ -191,7 +229,7 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
 
         mbedtls_chachapoly_context chatx;
         int ret = mse_decrypt_ct(vendorParam.data, vendorParam.len);
-        if (ret != 0) {
+        if (ret != PICOKEYS_OK) {
             CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
         }
 
@@ -222,7 +260,7 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
             }
             int ret = mbedtls_ecp_read_key(MBEDTLS_ECP_DP_SECP256R1, &ekey, keydev, 32);
             mbedtls_platform_zeroize(keydev, sizeof(keydev));
-            if (ret != 0) {
+            if (ret != PICOKEYS_OK) {
                 mbedtls_ecdsa_free(&ekey);
                 CBOR_ERROR(CTAP2_ERR_PROCESSING);
             }
@@ -253,12 +291,24 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
             CBOR_CHECK(cbor_encode_byte_string(&mapEncoder, buffer + sizeof(buffer) - ret, ret));
         }
     }
-    else {
-        CBOR_ERROR(CTAP2_ERR_UNSUPPORTED_OPTION);
+    else if (cmd == CTAP_VENDOR_VAULT) {
+        int vault_ctap_error = 0;
+        CborError vault_error = vault_vendor_command(vendorCmd, vendorParam, pinUvAuthParam, pinUvAuthProtocol, raw_vendor_params, raw_vendor_params_len, vault_algorithm, vault_algorithm_present, encoder, &resp_size, &vault_response_handled, &vault_ctap_error);
+        if (vault_ctap_error != 0) {
+            CBOR_ERROR(vault_ctap_error);
+        }
+        if (vault_error != CborNoError) {
+            error = vault_error;
+            goto err;
+        }
     }
-    CBOR_CHECK(cbor_encoder_close_container(&encoder, &mapEncoder));
-    resp_size = cbor_encoder_get_buffer_size(&encoder, ctap_resp->init.data + 1);
-
+    else {
+        CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+    }
+    if (!vault_response_handled) {
+        CBOR_CHECK(cbor_encoder_close_container(&encoder, &mapEncoder));
+        resp_size = cbor_encoder_get_buffer_size(&encoder, ctap_resp->init.data + 1);
+    }
 err:
     CBOR_FREE_BYTE_STRING(pinUvAuthParam);
     CBOR_FREE_BYTE_STRING(vendorParam);

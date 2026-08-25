@@ -93,6 +93,8 @@ extern int ecdh(uint8_t protocol, const mbedtls_ecp_point *Q, uint8_t *sharedSec
 #ifndef MAX_PIN_RETRIES
 #define MAX_PIN_RETRIES 8
 #endif
+#define PIN_RETRY_COUNT_MASK 0x7f // Retry counts are limited to 0..MAX_PIN_RETRIES.
+#define PIN_RETRY_POWER_CYCLE 0x80 // Persistent soft-lock marker in the existing PIN EF.
 extern bool getUserPresentFlagValue(void);
 extern bool getUserVerifiedFlagValue(void);
 extern void clearUserPresentFlag(void);
@@ -111,6 +113,7 @@ extern void set_opts(uint8_t);
 #define MAX_FRAGMENT_LENGTH       (MAX_MSG_SIZE - 64)
 #define MAX_LARGE_BLOB_SIZE       2048
 #define MAX_RPIDS_MINPIN_LENGTH   120
+#define STATEFUL_WALK_IDLE_MS     (30 * 1000)
 typedef struct known_app {
     const uint8_t *rp_id_hash;
     const char *label;
@@ -156,8 +159,10 @@ extern pinUvAuthToken_t paut;
 extern persistentPinUvAuthToken_t ppaut;
 
 extern int verify(uint8_t protocol, const uint8_t *key, const uint8_t *data, uint16_t len, uint8_t *sign);
+extern int verify_hmac_secret(uint8_t protocol, const uint8_t *key, const uint8_t *data, uint16_t len, const uint8_t *sign, uint16_t sign_len);
 
 extern uint8_t session_pin[32];
+extern bool keydev_unlocked;
 extern uint8_t certdev_sha256[32];
 
 typedef enum {
